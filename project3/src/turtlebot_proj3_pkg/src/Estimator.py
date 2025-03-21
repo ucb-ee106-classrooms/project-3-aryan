@@ -148,6 +148,7 @@ class Estimator:
         self.plot_thlline(self.ln_thl_hat, self.x_hat)
         self.plot_thrline(self.ln_thr, self.x)
         self.plot_thrline(self.ln_thr_hat, self.x_hat)
+        plt.savefig(f'{self.canvas_title}.png')
 
     def plot_xyline(self, ln, data):
         if len(data):
@@ -246,11 +247,29 @@ class DeadReckoning(Estimator):
         super().__init__()
         self.canvas_title = 'Dead Reckoning'
 
+    def model(self, x, u):
+        _, phi, x, y, thl, thr = x
+        _, u_L, u_R = u
+        dphi = (u_R - u_L) * self.r / (2 * self.d)
+        dx = (u_R + u_L) * (self.r / 2) * np.cos(phi)
+        dy = (u_R + u_L) * (self.r / 2) * np.sin(phi)
+        dthl = u_L
+        dthr = u_R
+        return [dphi, dx, dy, dthl, dthr]
+
     def update(self, _):
         if len(self.x_hat) > 0 and self.x_hat[-1][0] < self.x[-1][0]:
-            # TODO: Your implementation goes here!
-            # You may ONLY use self.u and self.x[0] for estimation
-            raise NotImplementedError
+            x_hat_t = self.x_hat[-1]
+            u_t = self.u[-1]
+            dphi, dx, dy, dthl, dthr = self.model(x_hat_t, u_t)
+            x_tp1 = [x_hat_t[0] + self.dt,
+                     x_hat_t[1] + dphi * self.dt,
+                     x_hat_t[2] + dx * self.dt,
+                     x_hat_t[3] + dy * self.dt,
+                     x_hat_t[4] + dthl * self.dt,
+                     x_hat_t[5] + dthr * self.dt]
+            self.x_hat.append(x_tp1)
+            print(self.x_hat[-1], self.x[-1])
 
 
 class KalmanFilter(Estimator):
@@ -279,17 +298,33 @@ class KalmanFilter(Estimator):
         super().__init__()
         self.canvas_title = 'Kalman Filter'
         self.phid = np.pi / 4
-        # TODO: Your implementation goes here!
-        # You may define the A, C, Q, R, and P matrices below.
+        self.A = np.eye(4)
+        self.B = np.array([[(self.r/2) * np.cos(self.phid), (self.r/2) * np.cos(self.phid)],
+                           [(self.r/2) * np.sin(self.phid), (self.r/2) * np.sin(self.phid)],
+                           [1, 0],
+                           [0, 1]]) * self.dt
+        self.C = np.array([[1, 0, 0, 0],
+                           [0, 1, 0, 0]])
+        self.Q = np.eye(4) * 100.0
+        self.R = np.eye(2)
+        self.P = np.eye(4)
 
     # noinspection DuplicatedCode
     # noinspection PyPep8Naming
     def update(self, _):
         if len(self.x_hat) > 0 and self.x_hat[-1][0] < self.x[-1][0]:
-            # TODO: Your implementation goes here!
-            # You may use self.u, self.y, and self.x[0] for estimation
-            raise NotImplementedError
-
+            x_t = self.x_hat[-1]
+            u_t = self.u[-1]
+            y_t = self.y[-1]
+            
+            x_hat_tp1_t = np.dot(self.A, x_t[2:]) + np.dot(self.B, u_t[1:])
+            P_tp1_t = self.A @ self.P @ self.A.T + self.Q
+            K = P_tp1_t @ self.C.T @ np.linalg.inv(self.C @ P_tp1_t @ self.C.T + self.R)
+            x_hat_tp1 = x_hat_tp1_t + K @ (np.array(y_t[1:]) - self.C @ x_hat_tp1_t)
+            self.P = (np.eye(4) - K @ self.C) @ P_tp1_t
+            x_hat_tp1 = [self.x_hat[-1][0] + self.dt, self.phid, x_hat_tp1[0], x_hat_tp1[1], x_hat_tp1[2], x_hat_tp1[3]]
+            self.x_hat.append(x_hat_tp1)
+            print(self.x_hat[-1], self.x[-1])
 
 # noinspection PyPep8Naming
 class ExtendedKalmanFilter(Estimator):
@@ -322,14 +357,74 @@ class ExtendedKalmanFilter(Estimator):
     def __init__(self):
         super().__init__()
         self.canvas_title = 'Extended Kalman Filter'
-        self.landmark = (0.5, 0.5)
-        # TODO: Your implementation goes here!
-        # You may define the Q, R, and P matrices below.
+        self.A = None
+        self.B = None
+        self.C = np.array([[0, 1, 0, 0, 0],
+                           [0, 0, 1, 0, 0]])
+        self.Q = np.diag([0.01, 0.25, 0.25, 0.01, 0.01])
+        self.R = np.eye(2) * 100.0
+        self.P = np.diag([1.0, 0.25, 0.25, 100.0, 100.0])
 
     # noinspection DuplicatedCode
     def update(self, _):
         if len(self.x_hat) > 0 and self.x_hat[-1][0] < self.x[-1][0]:
-            # TODO: Your implementation goes here!
-            # You may use self.u, self.y, and self.x[0] for estimation
-            raise NotImplementedError
+            x_hat_t = self.x_hat[-1][1:]
+            u_t = self.u[-1][1:]
+            y_t = self.y[-1][1:]
+            
+            x_hat_tp1_t = self.g(x_hat_t, u_t)
+            A = self.approx_A(x_hat_t, u_t)
+            P_tp1_t = A @ self.P @ A.T + self.Q
+            C = self.approx_C(x_hat_tp1_t)
+            K = P_tp1_t @ C.T @ np.linalg.inv(C @ P_tp1_t @ C.T + self.R)
+            x_hat_tp1 = x_hat_tp1_t + K @ (y_t - self.h(x_hat_tp1_t, y_t))
+            self.P = (np.eye(5) - K @ C) @ P_tp1_t
+            x_hat_tp1 = x_hat_tp1.tolist()
+            x_hat_tp1 = [self.x_hat[-1][0] + self.dt] + x_hat_tp1
+            self.x_hat.append(x_hat_tp1)
+            print(self.x_hat[-1], self.x[-1], self.y[-1])
+            
+    def f(self, x, u):
+        phi, x, y, thl, thr = x
+        u1, u2 = u
+        dphi = (u2 - u1) * self.r / (2 * self.d)
+        dx = (u2 + u1) * (self.r / 2) * np.cos(phi)
+        dy = (u2 + u1) * (self.r / 2) * np.sin(phi)
+        dthl = u1
+        dthr = u2
+        return [dphi, dx, dy, dthl, dthr]
 
+    def g(self, x, u):
+        dphi, dx, dy, dthl, dthr = self.f(x, u)
+        phi, x, y, thl, thr = x
+        u1, u2 = u
+        return [phi + dphi * self.dt,
+                x   + dx   * self.dt,
+                y   + dy   * self.dt,
+                thl + dthl * self.dt,
+                thr + dthr * self.dt]
+
+    def h(self, x, y_obs):
+        return self.C @ x
+
+    def approx_A(self, x, u):
+        """
+        dg/dx evaluated at (x, u)
+        g = x + f(x, u) * dt
+        dg/dx = I + df/dx * dt
+        """
+        phi, x, y, thl, thr = x
+        u1, u2 = u
+        df_dx = np.zeros((5, 5))
+        df_dx[1, 0] = -(u1 + u2) * (self.r / 2) * np.sin(phi)
+        df_dx[2, 0] = +(u1 + u2) * (self.r / 2) * np.cos(phi)
+        dg_dx = np.eye(5) + df_dx * self.dt
+        return dg_dx
+    
+    def approx_C(self, x):
+        """
+        dh/dx evaluated at (x)
+        h = Cx
+        dh/dx = C
+        """
+        return self.C

@@ -97,6 +97,7 @@ class Estimator:
             self.u.append(np.array(data[7:9]))
             self.y.append(np.array(data[9:12]))
             if i == 0:
+                print("Initializing...")
                 self.x_hat.append(self.x[-1])
             else:
                 self.update(i)
@@ -131,6 +132,7 @@ class Estimator:
         self.plot_xline(self.ln_x_hat, self.x_hat)
         self.plot_zline(self.ln_z, self.x)
         self.plot_zline(self.ln_z_hat, self.x_hat)
+        plt.savefig(f'{self.canvas_title}.png')
 
     def plot_xzline(self, ln, data):
         if len(data):
@@ -205,33 +207,36 @@ class DeadReckoning(Estimator):
     def __init__(self, is_noisy=False):
         super().__init__(is_noisy)
         self.canvas_title = 'Dead Reckoning'
+        
+    def model(self, x, u):
+        x, z, phi, vx, vz, vphi = x
+        u1, u2 = u
+        dx = vx
+        dz = vz
+        dphi = vphi
+        dvx = -(u1 / self.m) * np.sin(phi)
+        dvz = (u1 / self.m) * np.cos(phi) - self.gr
+        dvphi = (u2 / self.J)
+        return [dx, dz, dphi, dvx, dvz, dvphi]
 
     def update(self, _):
         if len(self.x_hat) > 0:
             # TODO: Your implementation goes here!
             # You may ONLY use self.u and self.x[0] for estimation
-            prev_state = self.x_hat[-1]
-            x_curr, z_curr, theta_curr = prev_state[0], prev_state[1], prev_state[2]
-
-            # Extract control inputs
-            v = self.u[-1][0]  # linear
-            omega = self.u[-1][1]  # anuglar
-            dt = self.dt
-
-            # Update position withvelocity
-            x_new = x_curr + v * np.cos(theta_curr) * dt
-            z_new = z_curr + v * np.sin(theta_curr) * dt
-            theta_new = theta_curr + omega * dt
-
-            # normalize theta to [-pi, pi]
-            theta_new = np.arctan2(np.sin(theta_new), np.cos(theta_new))
-
-            v_x = v * np.cos(theta_new)
-            v_z = v * np.sin(theta_new)
-
-            # Append new state estimate
-            self.x_hat.append([x_new, z_new, theta_new, v_x, v_z, omega])
-
+            
+            x_hat_t = self.x_hat[-1]
+            u_t = self.u[-1]
+            x_hat, z_hat, phi_hat, vx_hat, vz_hat, vphi_hat = x_hat_t
+            dx, dz, dphi, dvx, dvz, dvphi = self.model(x_hat_t, u_t)
+            x_hat_t1 = [x_hat + dx * self.dt,
+                        z_hat + dz * self.dt,
+                        phi_hat + dphi * self.dt,
+                        vx_hat + dvx * self.dt,
+                        vz_hat + dvz * self.dt,
+                        vphi_hat + dvphi * self.dt]
+            self.x_hat.append(x_hat_t1)
+            print(self.x_hat[-1], self.x[-1])
+            
 
 # noinspection PyPep8Naming
 class ExtendedKalmanFilter(Estimator):
@@ -262,30 +267,87 @@ class ExtendedKalmanFilter(Estimator):
     def __init__(self, is_noisy=False):
         super().__init__(is_noisy)
         self.canvas_title = 'Extended Kalman Filter'
-        # TODO: Your implementation goes here!
-        # You may define the Q, R, and P matrices below.
         self.A = None
         self.B = None
         self.C = None
-        self.Q = None
-        self.R = None
-        self.P = None
+        self.Q = np.eye(6) * 0.01
+        self.R = np.eye(2) * 10.0
+        self.P = np.eye(6) * 0.1
 
     # noinspection DuplicatedCode
     def update(self, i):
-        if len(self.x_hat) > 0: #and self.x_hat[-1][0] < self.x[-1][0]:
-            # TODO: Your implementation goes here!
-            # You may use self.u, self.y, and self.x[0] for estimation
-            raise NotImplementedError
+        if len(self.x_hat) > 0: # and self.x_hat[-1][0] < self.x[-1][0]:
+            x_hat_t = self.x_hat[-1]
+            u_t = self.u[-1]
+            y_t = self.y[-1]
+            
+            x_hat_tp1_t = self.g(x_hat_t, u_t)
+            A = self.approx_A(x_hat_t, u_t)
+            P_tp1_t = A @ self.P @ A.T + self.Q
+            C = self.approx_C(x_hat_tp1_t)
+            K = P_tp1_t @ C.T @ np.linalg.inv(C @ P_tp1_t @ C.T + self.R)
+            x_hat_tp1 = x_hat_tp1_t + K @ (y_t - self.h(x_hat_tp1_t, y_t))
+            self.P = (np.eye(6) - K @ C) @ P_tp1_t
+            x_hat_tp1 = x_hat_tp1.tolist()
+            self.x_hat.append(x_hat_tp1)
+            print(self.x_hat[-1], self.x[-1])
+            
+
+    def f(self, x, u):
+        x, z, phi, vx, vz, vphi = x
+        u1, u2 = u
+        dx = vx
+        dz = vz
+        dphi = vphi
+        dvx = -(u1 / self.m) * np.sin(phi)
+        dvz = +(u1 / self.m) * np.cos(phi) - self.gr
+        dvphi = (u2 / self.J)
+        return [dx, dz, dphi, dvx, dvz, dvphi]
 
     def g(self, x, u):
-        raise NotImplementedError
+        dx, dz, dphi, dvx, dvz, dvphi = self.f(x, u)
+        x, z, phi, vx, vz, vphi = x
+        u1, u2 = u
+        return [x    + dx    * self.dt,
+                z    + dz    * self.dt,
+                phi  + dphi  * self.dt,
+                vx   + dvx   * self.dt,
+                vz   + dvz   * self.dt,
+                vphi + dvphi * self.dt]
 
     def h(self, x, y_obs):
-        raise NotImplementedError
+        x, z, phi, vx, vz, vphi = x
+        landmark_x, landmark_y, landmark_z = self.landmark
+        distance = np.sqrt((landmark_x - x) ** 2 + (landmark_y - 0) ** 2 + (landmark_z - z) ** 2)
+        bearing = phi
+        return [distance, bearing]
 
     def approx_A(self, x, u):
-        raise NotImplementedError
+        """
+        dg/dx evaluated at (x, u)
+        g = x + f(x, u) * dt
+        dg/dx = I + df/dx * dt
+        """
+        x, z, phi, vx, vz, vphi = x
+        u1, u2 = u
+        df_dx = np.zeros((6, 6))
+        df_dx[0, 3] = 1
+        df_dx[1, 4] = 1
+        df_dx[2, 5] = 1
+        df_dx[3, 2] = -(u1 / self.m) * np.cos(phi)
+        df_dx[4, 2] = -(u1 / self.m) * np.sin(phi)
+        dg_dx = np.eye(6) + df_dx * self.dt
+        return dg_dx
     
     def approx_C(self, x):
-        raise NotImplementedError
+        """
+        dh/dx evaluated at (x)
+        """
+        x, z, phi, vx, vz, vphi = x
+        landmark_x, landmark_y, landmark_z = self.landmark
+        dh_dx = np.zeros((2, 6))
+        distance = np.sqrt((landmark_x - x) ** 2 + (landmark_y - 0) ** 2 + (landmark_z - z) ** 2)
+        dh_dx[0, 0] = (x - landmark_x) / distance
+        dh_dx[0, 1] = (z - landmark_z) / distance
+        dh_dx[1, 2] = 1
+        return dh_dx
